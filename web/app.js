@@ -14,15 +14,16 @@ const ACTIVITIES = [
     type: 'commute',
     name: '출퇴근 (자전거/걷기 포함)',
     icon: '🚴‍♀️',
-    description: '출근/퇴근, 이동수단 기록',
+    description: '08~10시 헬스데이터 우선, 수동 입력 시 절반 포인트',
     points: 15,
   },
   {
     type: 'video_meeting',
     name: '화상회의',
     icon: '💻',
-    description: '대면 회의를 대체한 화상회의 세션',
+    description: '대면 회의를 대체한 화상회의 세션 (사진 인증)',
     points: 10,
+    requiresPhoto: true,
   },
   {
     type: 'business_trip',
@@ -32,6 +33,13 @@ const ACTIVITIES = [
     points: 80,
   },
 ];
+
+const VERIFICATION_LABELS = {
+  auto: '자동 기록',
+  'photo-required': '사진 인증',
+  'manual-50%': '수동 · 50%',
+  'health-api': '헬스 데이터',
+};
 
 const QUEST_POOL = [
   {
@@ -63,6 +71,12 @@ const TEAMS = [
   { id: 'gold_c', name: '클린 퓨처', league: 'gold' },
 ];
 
+const LEAGUE_BASE_POINTS = {
+  bronze: [120, 95, 80],
+  silver: [210, 180, 150],
+  gold: [320, 280, 250],
+};
+
 const emptyState = () => ({
   user: null,
   consent: null,
@@ -93,6 +107,27 @@ function persist() {
 
 function formatDate(date) {
   return new Date(date).toLocaleString();
+}
+
+function formatVerification(mode) {
+  return VERIFICATION_LABELS[mode] || mode || '';
+}
+
+function nowIsoForInput() {
+  return new Date().toISOString().slice(0, 16);
+}
+
+function isInCommuteWindow(dateString) {
+  const d = new Date(dateString);
+  const hour = d.getHours();
+  return hour >= 8 && hour < 10;
+}
+
+function deriveCommuteWindow() {
+  const start = new Date();
+  start.setHours(9, 0, 0, 0);
+  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  return { start: start.toISOString(), end: end.toISOString() };
 }
 
 function updateStreak(startedAt) {
@@ -170,6 +205,21 @@ function computeStats() {
     },
     teamStats: { todayActivities: teamToday.length },
   };
+}
+
+function computeTeamTotals() {
+  const totals = {};
+  TEAMS.forEach((t) => {
+    totals[t.id] = 0;
+  });
+  state.activities
+    .filter((a) => a.status === 'approved')
+    .forEach((a) => {
+      if (totals[a.teamId] !== undefined) {
+        totals[a.teamId] += a.points || 0;
+      }
+    });
+  return totals;
 }
 
 function addFeedItem(item) {
@@ -322,6 +372,7 @@ function renderActivityLog(log) {
         <strong>${ACTIVITIES.find((a) => a.type === log.type)?.name}</strong>
         <span class="badge ${log.status}">${log.status}</span>
         <span class="badge approved">${log.points || 0} pts</span>
+        ${log.verificationMode ? `<span class="badge">${formatVerification(log.verificationMode)}</span>` : ''}
       </div>
       <p class="status-text">${log.note || ''}</p>
       <p class="small-text">시작: ${formatDate(log.startedAt)} ${log.endedAt ? `· 종료: ${formatDate(log.endedAt)}` : ''}</p>
@@ -333,6 +384,26 @@ function renderActivityLog(log) {
 
 function openActivityForm(type) {
   const activity = ACTIVITIES.find((a) => a.type === type);
+  const defaultTimeValue = nowIsoForInput();
+  const manualTimeInputs = `
+      <label>시작 시각 <input id="startInput" class="input" type="datetime-local" value="${defaultTimeValue}" /></label>
+      <label>종료 시각 <input id="endInput" class="input" type="datetime-local" value="${defaultTimeValue}" /></label>
+    `;
+  const timeSection =
+    activity.type === 'commute'
+      ? `
+      <label>기록 방식
+        <select id="commuteSource" class="input">
+          <option value="health_api">헬스 데이터 (권장)</option>
+          <option value="manual">수동 입력 (절반 포인트)</option>
+        </select>
+      </label>
+      <div id="commuteManualFields">${manualTimeInputs}</div>
+      <p class="status-text">08~10시 사이 데이터만 인정 · 헬스 데이터 선택 시 09:00~09:30으로 자동 기록됩니다.</p>
+    `
+      : activity.type === 'tumbler' || activity.type === 'video_meeting'
+        ? `<p class="status-text">시작/종료 시각은 기록 시점 기준으로 자동 저장됩니다.</p>`
+        : manualTimeInputs;
   const modal = document.createElement('div');
   modal.className = 'card';
   modal.style.position = 'fixed';
@@ -346,9 +417,8 @@ function openActivityForm(type) {
     <h3 class="section-title">${activity.icon} ${activity.name}</h3>
     <div class="form-row">
       <label>메모 <input id="noteInput" class="input" placeholder="간단한 설명" /></label>
-      <label>시작 시각 <input id="startInput" class="input" type="datetime-local" /></label>
-      <label>종료 시각 <input id="endInput" class="input" type="datetime-local" /></label>
     </div>
+    ${timeSection}
     ${activity.requiresPhoto ? '<label>사진 인증 <input id="photoInput" class="input" type="file" accept="image/*" /></label>' : ''}
     ${activity.type === 'commute' ? '<label>이동수단<select id="modeInput" class="input"><option value="bike">자전거</option><option value="walk">걷기</option><option value="public">대중교통</option></select></label>' : ''}
     <div class="stack">
@@ -359,12 +429,22 @@ function openActivityForm(type) {
   `;
   document.body.appendChild(modal);
 
+  const commuteSource = document.getElementById('commuteSource');
+  if (commuteSource) {
+    const toggleManual = () => {
+      const isManual = commuteSource.value === 'manual';
+      document.querySelectorAll('#commuteManualFields input').forEach((el) => {
+        el.disabled = !isManual;
+      });
+    };
+    commuteSource.onchange = toggleManual;
+    toggleManual();
+  }
+
   document.getElementById('closeModal').onclick = () => modal.remove();
 
   document.getElementById('submitActivity').onclick = async () => {
     const note = document.getElementById('noteInput').value;
-    const startedAt = document.getElementById('startInput').value || new Date().toISOString();
-    const endedAt = document.getElementById('endInput').value;
     const mode = document.getElementById('modeInput')?.value;
     const photoInput = document.getElementById('photoInput');
     if (activity.requiresPhoto && !photoInput?.files?.length) {
@@ -375,8 +455,49 @@ function openActivityForm(type) {
     if (photoInput?.files?.[0]) {
       photoName = photoInput.files[0].name;
     }
-    const status = activity.requiresPhoto ? 'pending' : 'approved';
-    const points = status === 'approved' ? activity.points : 0;
+
+    let startedAt;
+    let endedAt;
+    let verificationMode = 'auto';
+    let status = activity.requiresPhoto ? 'pending' : 'approved';
+    let points = status === 'approved' ? activity.points : 0;
+
+    if (activity.type === 'tumbler') {
+      startedAt = new Date().toISOString();
+      endedAt = startedAt;
+      verificationMode = 'photo-required';
+    } else if (activity.type === 'video_meeting') {
+      startedAt = new Date().toISOString();
+      endedAt = startedAt;
+      verificationMode = 'photo-required';
+    } else if (activity.type === 'commute') {
+      const source = commuteSource?.value || 'health_api';
+      verificationMode = source === 'manual' ? 'manual-50%' : 'health-api';
+      if (source === 'health_api') {
+        const windowTimes = deriveCommuteWindow();
+        startedAt = windowTimes.start;
+        endedAt = windowTimes.end;
+      } else {
+        const manualStart = document.getElementById('startInput')?.value;
+        const manualEnd = document.getElementById('endInput')?.value;
+        if (!manualStart) {
+          alert('출퇴근 시간 입력이 필요합니다.');
+          return;
+        }
+        startedAt = manualStart;
+        endedAt = manualEnd || manualStart;
+      }
+      if (!isInCommuteWindow(startedAt)) {
+        alert('출퇴근은 08:00~10:00 사이 데이터만 인정됩니다.');
+        return;
+      }
+      status = 'approved';
+      points = Math.round(activity.points * (verificationMode === 'manual-50%' ? 0.5 : 1));
+    } else {
+      startedAt = document.getElementById('startInput').value || new Date().toISOString();
+      endedAt = document.getElementById('endInput').value;
+    }
+
     const entry = {
       id: crypto.randomUUID(),
       userEmail: state.user.email,
@@ -389,6 +510,7 @@ function openActivityForm(type) {
       photoName,
       status,
       points,
+      verificationMode,
       createdAt: new Date().toISOString(),
     };
     state.activities.push(entry);
@@ -438,11 +560,13 @@ function renderQuests(container) {
 function renderTeamLeaderboard(container) {
   const league = state.league || 'bronze';
   const leagueTeams = TEAMS.filter((t) => t.league === league);
-  const basePoints = { bronze: 120, silver: 240, gold: 360 };
-  const leaderboard = leagueTeams.map((t, idx) => ({
-    ...t,
-    weeklyPoints: basePoints[league] - idx * 35 + Math.floor(Math.random() * 25),
-  }));
+  const baseline = LEAGUE_BASE_POINTS[league] || [];
+  const totals = computeTeamTotals();
+  const leaderboard = leagueTeams.map((t, idx) => {
+    const base = baseline[idx] || 0;
+    const earned = totals[t.id] || 0;
+    return { ...t, weeklyPoints: base + earned, earned };
+  });
   const userTeamId = state.user.teamId;
   const notice = `리그: ${league.toUpperCase()} · 상위 1팀 승급 / 하위 1팀 강등 / 중간 유지 (주간 리셋 모의)`;
   container.innerHTML = `
@@ -458,7 +582,7 @@ function renderTeamLeaderboard(container) {
             <tr ${team.id === userTeamId ? 'style="color: var(--accent)"' : ''}>
               <td>${idx + 1}</td>
               <td>${team.name} ${team.id === userTeamId ? '(내 팀)' : ''}</td>
-              <td>${team.weeklyPoints}</td>
+              <td>${team.weeklyPoints}${team.earned ? ` (내 팀 기여 +${team.earned})` : ''}</td>
             </tr>
           `).join('')}
         </tbody>

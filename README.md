@@ -17,7 +17,13 @@ The `web/` folder contains a static, dependency-free demo that mirrors the produ
 
 ### Run locally
 ```bash
-cd web
-python -m http.server 8000
+./serve.sh
 ```
-Open `http://localhost:8000` in your browser. Use OTP `246810` for test login.
+Open `http://localhost:8000` in your browser (OTP `246810`).
+
+### Quick test flow
+1) **로그인/동의**: 이메일 + OTP 입력 → 연간 동의 체크. 새 브라우저에서 테스트하면 로컬 스토리지 초기 상태로 시작됩니다.
+2) **활동 기록**: 활동 아이콘 클릭 → 텀블러/화상회의는 사진 필수 + 자동 시각, "승인" 버튼으로 포인트 적립. 출퇴근은 기본 헬스 데이터(09:00~09:30)로 기록되며 수동 입력 시 절반 포인트입니다.
+3) **퀘스트 확인**: 설정된 3개의 일일 퀘스트가 자동 활성화됩니다. 활동 기록/포인트가 조건을 충족하면 완료 표시가 업데이트됩니다.
+4) **리그/리더보드**: 팀 리그(브론즈/실버/골드) 탭을 전환해 점수 분포를 확인합니다. 개인 탭에서 포인트/연속 활동일을 확인합니다.
+5) **피드/댓글**: 활동, 승인, 퀘스트 완료가 피드에 자동 게시됩니다. 카드의 댓글 입력란에서 즉시 피드백을 남길 수 있습니다.
